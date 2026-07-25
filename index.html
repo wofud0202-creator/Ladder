@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>사다리 작업허가서 관리 | DL이앤씨</title>
+
+<!-- React -->
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (compat SDK: 별도 빌드 도구 없이 script 태그로 바로 사용) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Malgun Gothic','Apple SD Gothic Neo','Pretendard',sans-serif; background:#F6F5F2; color:#20242A; }
+  input, textarea, select, button { font-family: inherit; }
+  @media print {
+    .no-print { display: none !important; }
+    body { background:#fff !important; }
+  }
+  @page { size: A4; margin: 12mm; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ===================================================================
+     설정: Firebase 프로젝트 정보를 아래에 채워 넣으세요.
+     (Firebase 콘솔 > 프로젝트 설정 > 일반 > 내 앱 > SDK 설정 및 구성 에서 복사)
+     =================================================================== -->
+<script>
+  window.__FIREBASE_CONFIG__ = {
+    apiKey: "여기에_API_KEY",
+    authDomain: "여기에_PROJECT_ID.firebaseapp.com",
+    projectId: "여기에_PROJECT_ID",
+    storageBucket: "여기에_PROJECT_ID.appspot.com",
+    messagingSenderId: "여기에_SENDER_ID",
+    appId: "여기에_APP_ID"
+  };
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useRef } = React;
+
+let db = null;
+let firebaseReady = false;
+try {
+  if (window.__FIREBASE_CONFIG__.apiKey !== "여기에_API_KEY") {
+    firebase.initializeApp(window.__FIREBASE_CONFIG__);
+    db = firebase.firestore();
+    firebaseReady = true;
+  }
+} catch (e) { console.error("Firebase init 실패", e); }
+
+const CHECKLIST_ITEMS = [
+  { key: "pair", label: "2인1조 진행" },
+  { key: "ppe", label: "개인보호구 착용 (안전대 필수)" },
+  { key: "outrigger", label: "전도방지대(아웃트리거) 설치" },
+  { key: "topStep", label: "최상답단 사용금지" },
+  { key: "antislip", label: "미끄럼방지시설(논슬립테잎) 여부" },
+  { key: "topFix", label: "일자형 상부 고정조치" },
+  { key: "earlyLunch", label: "조출 / 점심 작업 여부" },
+  { key: "dspm", label: "DSPM 등재 여부" },
+];
+const APPROVAL_STEPS = ["1차 검토 (시공)", "2차 검토 (안전)", "승인 (소장)"];
+
+// DL이앤씨 관리자만 승인/반려를 할 수 있도록 하는 PIN. 배포 전 원하는 번호로 변경하세요.
+const ADMIN_PIN = "4507";
+
+const STATUS_STYLE = {
+  "작성중": { bg: "#F1F0EC", fg: "#6B6560", dot: "#B5AFA6" },
+  "검토중": { bg: "#FDF3DC", fg: "#8A5B0A", dot: "#F5A623" },
+  "반려": { bg: "#FBEAE8", fg: "#A32D24", dot: "#D9453A" },
+  "승인완료": { bg: "#E7F2ED", fg: "#1D6E4C", dot: "#2E9C6C" },
+  "작업중": { bg: "#E7EEF6", fg: "#1B4A7A", dot: "#2E6BAA" },
+  "완료": { bg: "#EDEBF6", fg: "#4A3B8A", dot: "#7A64C9" },
+};
+
+const emptyPermit = () => ({
+  id: "P" + Date.now() + Math.floor(Math.random() * 1000),
+  permitNo: "", coopCompany: "", workType: "A형",
+  workDateStart: "", workDateEnd: "", workTimeStart: "", workTimeEnd: "",
+  location: "", workContent: "",
+  emergencyName: "", emergencyPosition: "", emergencyPhone: "",
+  applicantName: "", applicantPosition: "", applicantPhone: "",
+  extraNote: "",
+  checklist: Object.fromEntries(CHECKLIST_ITEMS.map((c) => [c.key, "N/A"])),
+  drawingImage: null,
+  approvals: [],
+  dailyChecks: Array.from({ length: 7 }, (_, i) => ({ day: i + 1, date: "", coopSign: null, dleSign: null })),
+  status: "작성중",
+  createdAt: new Date().toISOString(),
+  createdBy: null,
+});
+
+const inputStyle = { width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid #E7E4DE", fontSize: 13.5, background: "#FCFBF9" };
+const thStyle = { textAlign: "left", padding: "6px 8px", color: "#9C968D", fontWeight: 700, borderBottom: "1px solid #E7E4DE" };
+const tdStyle = { padding: "6px 8px", borderBottom: "1px solid #F1F0EC" };
+
+function resizeImage(file, maxW, quality) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxW / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------------- 로그인 ----------------
+function LoginGate({ onLogin }) {
+  const [company, setCompany] = useState("");
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pin, setPin] = useState("");
+  const [pinError, setPinError] = useState(false);
+  const canSubmit = company.trim() && name.trim() && phone.trim() && (!isAdmin || pin.trim());
+
+  const submit = () => {
+    if (isAdmin && pin.trim() !== ADMIN_PIN) { setPinError(true); return; }
+    onLogin({ company: company.trim(), name: name.trim(), phone: phone.trim(), role: isAdmin ? "admin" : "coop" });
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 16, padding: 28, width: "100%", maxWidth: 360, border: "1px solid #E7E4DE" }}>
+        <div style={{ width: 40, height: 40, borderRadius: 10, background: "#F5A623", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14, fontSize: 20 }}>⚠️</div>
+        <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 2 }}>사다리 작업허가서 관리</div>
+        <div style={{ fontSize: 12, color: "#9C968D", marginBottom: 20 }}>DL이앤씨 주택사업본부 · 접속자 확인</div>
+
+        <Field label="업체명 (DL이앤씨 소속은 'DL이앤씨' 입력)">
+          <input style={inputStyle} value={company} onChange={(e) => setCompany(e.target.value)} placeholder="예: 세방테크 / DL이앤씨" />
+        </Field>
+        <div style={{ height: 10 }} />
+        <Field label="이름">
+          <input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} placeholder="예: 김영일" />
+        </Field>
+        <div style={{ height: 10 }} />
+        <Field label="연락처">
+          <input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="010-0000-0000" />
+        </Field>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, cursor: "pointer" }}>
+          <input type="checkbox" checked={isAdmin} onChange={(e) => { setIsAdmin(e.target.checked); setPinError(false); }} style={{ width: 16, height: 16 }} />
+          <span style={{ fontSize: 12.5, fontWeight: 700, color: "#5B5650" }}>DL이앤씨 승인 담당자로 로그인 (PIN 필요)</span>
+        </label>
+
+        {isAdmin && (
+          <div style={{ marginTop: 10 }}>
+            <input
+              type="password"
+              inputMode="numeric"
+              style={{ ...inputStyle, borderColor: pinError ? "#D9453A" : "#E7E4DE" }}
+              value={pin}
+              onChange={(e) => { setPin(e.target.value); setPinError(false); }}
+              placeholder="관리자 PIN 입력"
+            />
+            {pinError && <div style={{ fontSize: 11, color: "#D9453A", marginTop: 4 }}>PIN이 올바르지 않습니다.</div>}
+          </div>
+        )}
+
+        <button
+          disabled={!canSubmit}
+          onClick={submit}
+          style={{ marginTop: 18, width: "100%", padding: "11px 0", borderRadius: 10, border: "none", fontWeight: 800, fontSize: 14, cursor: canSubmit ? "pointer" : "not-allowed", background: canSubmit ? "#20242A" : "#E7E4DE", color: canSubmit ? "#fff" : "#A6A198" }}
+        >
+          입장하기
+        </button>
+
+        {!firebaseReady && (
+          <div style={{ marginTop: 14, fontSize: 11, color: "#A32D24", background: "#FBEAE8", padding: "8px 10px", borderRadius: 8, lineHeight: 1.5 }}>
+            ⚠ Firebase 설정이 비어 있습니다. index.html 하단의 firebaseConfig 값을 채워야 온라인 공유 저장이 동작합니다. 지금은 이 브라우저에만 임시 저장됩니다.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children, full }) {
+  return (
+    <div style={{ gridColumn: full ? "1 / -1" : undefined }}>
+      <div style={{ fontSize: 11.5, fontWeight: 700, color: "#9C968D", marginBottom: 4 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+// ---------------- 메인 앱 ----------------
+function App() {
+  const [session, setSession] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("permit_session") || "null"); } catch { return null; }
+  });
+  const [permits, setPermits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("dashboard");
+  const [activeId, setActiveId] = useState(null);
+  const [printId, setPrintId] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); };
+
+  useEffect(() => {
+    if (!session) return;
+    if (firebaseReady) {
+      const unsub = db.collection("permits").onSnapshot(
+        (snap) => {
+          const list = snap.docs.map((d) => d.data());
+          list.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+          setPermits(list);
+          setLoading(false);
+        },
+        (err) => { console.error(err); showToast("동기화 오류: " + err.message); setLoading(false); }
+      );
+      return () => unsub();
+    } else {
+      try { setPermits(JSON.parse(localStorage.getItem("permits_local") || "[]")); } catch { setPermits([]); }
+      setLoading(false);
+    }
+  }, [session]);
+
+  const persistOne = async (permit) => {
+    if (firebaseReady) {
+      try { await db.collection("permits").doc(permit.id).set(permit); }
+      catch (e) { showToast("저장 실패: " + e.message); }
+    } else {
+      const next = [permit, ...permits.filter((p) => p.id !== permit.id)];
+      setPermits(next);
+      localStorage.setItem("permits_local", JSON.stringify(next));
+    }
+  };
+
+  const updatePermit = (id, patch) => {
+    const cur = permits.find((p) => p.id === id);
+    if (!cur) return;
+    const next = { ...cur, ...patch, updatedAt: new Date().toISOString() };
+    if (!firebaseReady) setPermits((prev) => prev.map((p) => (p.id === id ? next : p)));
+    persistOne(next);
+  };
+
+  const createPermit = () => {
+    const p = emptyPermit();
+    p.createdBy = session;
+    p.coopCompany = session.company === "DL이앤씨" ? "" : session.company;
+    if (!firebaseReady) setPermits((prev) => [p, ...prev]);
+    persistOne(p);
+    setActiveId(p.id);
+    setView("edit");
+  };
+
+  const deletePermit = async (id) => {
+    if (firebaseReady) {
+      try { await db.collection("permits").doc(id).delete(); } catch (e) { showToast("삭제 실패: " + e.message); }
+    } else {
+      const next = permits.filter((p) => p.id !== id);
+      setPermits(next);
+      localStorage.setItem("permits_local", JSON.stringify(next));
+    }
+    setView("list");
+  };
+
+  const logout = () => { localStorage.removeItem("permit_session"); setSession(null); };
+
+  if (!session) {
+    return <LoginGate onLogin={(s) => { localStorage.setItem("permit_session", JSON.stringify(s)); setSession(s); }} />;
+  }
+
+  const active = permits.find((p) => p.id === activeId) || null;
+  const printPermit = permits.find((p) => p.id === printId) || null;
+
+  if (printPermit) return <PrintView permit={printPermit} onClose={() => setPrintId(null)} />;
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      <TopBar view={view} setView={setView} onNew={createPermit} session={session} onLogout={logout} />
+      {toast && (
+        <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: "#20242A", color: "#fff", padding: "8px 16px", borderRadius: 8, fontSize: 13, zIndex: 50 }}>{toast}</div>
+      )}
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 16px 80px" }}>
+        {loading ? (
+          <div style={{ textAlign: "center", padding: 60, color: "#8A857D" }}>불러오는 중…</div>
+        ) : view === "dashboard" ? (
+          <Dashboard permits={permits} onOpen={(id) => { setActiveId(id); setView("edit"); }} />
+        ) : view === "list" ? (
+          <ListView permits={permits} onOpen={(id) => { setActiveId(id); setView("edit"); }} />
+        ) : view === "edit" && active ? (
+          <EditView permit={active} session={session} onChange={(patch) => updatePermit(active.id, patch)} onBack={() => setView("list")} onDelete={() => deletePermit(active.id)} showToast={showToast} onPrint={() => setPrintId(active.id)} />
+        ) : (
+          <div style={{ textAlign: "center", padding: 60, color: "#8A857D" }}>허가서를 찾을 수 없습니다.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TopBar({ view, setView, onNew, session, onLogout }) {
+  const Tab = ({ id, label }) => (
+    <button onClick={() => setView(id)} style={{ padding: "8px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13.5, fontWeight: 700, background: view === id ? "#20242A" : "transparent", color: view === id ? "#fff" : "#5B5650" }}>{label}</button>
+  );
+  return (
+    <div className="no-print" style={{ position: "sticky", top: 0, zIndex: 30, background: "#FFFFFFEE", backdropFilter: "blur(6px)", borderBottom: "1px solid #E7E4DE" }}>
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 7, background: "#F5A623", display: "flex", alignItems: "center", justifyContent: "center" }}>⚠️</div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14.5, lineHeight: 1 }}>사다리 작업허가 관리</div>
+            <div style={{ fontSize: 10.5, color: "#9C968D" }}>
+              {session.company} · {session.name}
+              {session.role === "admin" && <span style={{ marginLeft: 6, background: "#20242A", color: "#F5A623", padding: "1px 6px", borderRadius: 999, fontSize: 9.5, fontWeight: 800 }}>관리자</span>}
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <Tab id="dashboard" label="대시보드" />
+          <Tab id="list" label="전체 목록" />
+          <button onClick={onNew} style={{ padding: "8px 14px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13.5, fontWeight: 700, background: "#F5A623", color: "#20242A" }}>+ 새 허가서</button>
+          <button onClick={onLogout} style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #E7E4DE", background: "#fff", cursor: "pointer", fontSize: 12, color: "#9C968D" }}>로그아웃</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ status }) {
+  const s = STATUS_STYLE[status] || STATUS_STYLE["작성중"];
+  return <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: s.bg, color: s.fg, padding: "3px 9px", borderRadius: 999, fontSize: 11.5, fontWeight: 700 }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: s.dot }} />{status}</span>;
+}
+
+function Dashboard({ permits, onOpen }) {
+  const active = permits.filter((p) => p.status === "승인완료" || p.status === "작업중");
+  const pending = permits.filter((p) => p.status === "검토중");
+  const rejected = permits.filter((p) => p.status === "반려");
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 20 }}>
+        <StatCard label="작업 진행중" value={active.length} color="#2E6BAA" />
+        <StatCard label="결재 대기" value={pending.length} color="#F5A623" />
+        <StatCard label="반려" value={rejected.length} color="#D9453A" />
+        <StatCard label="전체" value={permits.length} color="#20242A" />
+      </div>
+      <SectionTitle title="현재 승인되어 작업중인 목록" />
+      {active.length === 0 ? <EmptyState text="현재 승인·작업중인 허가서가 없습니다." /> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{active.map((p) => <ActivePermitCard key={p.id} permit={p} onOpen={() => onOpen(p.id)} />)}</div>
+      )}
+      {pending.length > 0 && (
+        <>
+          <SectionTitle title="결재 대기중" style={{ marginTop: 24 }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{pending.map((p) => <MiniRow key={p.id} permit={p} onOpen={() => onOpen(p.id)} />)}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, color }) {
+  return <div style={{ background: "#fff", border: "1px solid #E7E4DE", borderRadius: 12, padding: "14px 16px" }}><div style={{ fontSize: 24, fontWeight: 800, color }}>{value}</div><div style={{ fontSize: 12, color: "#8A857D", marginTop: 2 }}>{label}</div></div>;
+}
+function SectionTitle({ title, style }) { return <div style={{ fontSize: 13.5, fontWeight: 800, color: "#5B5650", marginBottom: 10, ...style }}>{title}</div>; }
+function EmptyState({ text }) { return <div style={{ textAlign: "center", padding: "36px 16px", background: "#fff", border: "1px dashed #DEDAD2", borderRadius: 12, color: "#A6A198", fontSize: 13 }}>{text}</div>; }
+
+function ActivePermitCard({ permit, onOpen }) {
+  const doneDays = permit.dailyChecks.filter((d) => d.coopSign && d.dleSign).length;
+  return (
+    <div onClick={onOpen} style={{ background: "#fff", border: "1px solid #E7E4DE", borderRadius: 12, padding: 14, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span style={{ fontWeight: 800, fontSize: 14 }}>{permit.permitNo || "번호 미기재"}</span>
+          <StatusBadge status={permit.status} />
+        </div>
+        <div style={{ fontSize: 12.5, color: "#6B6560", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{permit.coopCompany || "협력사 미기재"} · {permit.location || "위치 미기재"}</div>
+      </div>
+      <div style={{ textAlign: "right", flexShrink: 0 }}>
+        <div style={{ fontSize: 11.5, color: "#9C968D" }}>일일점검 완료</div>
+        <div style={{ fontWeight: 800, fontSize: 15, color: "#2E6BAA" }}>{doneDays} / 7일</div>
+      </div>
+    </div>
+  );
+}
+function MiniRow({ permit, onOpen }) {
+  return <div onClick={onOpen} style={{ background: "#fff", border: "1px solid #E7E4DE", borderRadius: 10, padding: "10px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}><div style={{ fontSize: 13, fontWeight: 700 }}>{permit.permitNo || "번호 미기재"} · {permit.coopCompany || "협력사 미기재"}</div><StatusBadge status={permit.status} /></div>;
+}
+
+function ListView({ permits, onOpen }) {
+  const [filter, setFilter] = useState("전체");
+  const statuses = ["전체", "작성중", "검토중", "반려", "승인완료", "작업중", "완료"];
+  const filtered = filter === "전체" ? permits : permits.filter((p) => p.status === filter);
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+        {statuses.map((s) => (
+          <button key={s} onClick={() => setFilter(s)} style={{ padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 700, cursor: "pointer", border: filter === s ? "1px solid #20242A" : "1px solid #E7E4DE", background: filter === s ? "#20242A" : "#fff", color: filter === s ? "#fff" : "#6B6560" }}>{s}</button>
+        ))}
+      </div>
+      {filtered.length === 0 ? <EmptyState text="해당 조건의 허가서가 없습니다." /> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>{filtered.map((p) => <ActivePermitCard key={p.id} permit={p} onOpen={() => onOpen(p.id)} />)}</div>
+      )}
+    </div>
+  );
+}
+
+// ---------------- 편집 화면 ----------------
+function EditView({ permit, session, onChange, onBack, onDelete, showToast, onPrint }) {
+  const [local, setLocal] = useState(permit);
+  useEffect(() => setLocal(permit), [permit.id, permit.updatedAt]);
+
+  const commit = (patch) => { const next = { ...local, ...patch }; setLocal(next); onChange(patch); };
+  const setField = (key) => (e) => commit({ [key]: e.target.value });
+  const setChecklist = (key, val) => commit({ checklist: { ...local.checklist, [key]: val } });
+
+  const [signTarget, setSignTarget] = useState(null);
+  const [approvalTarget, setApprovalTarget] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const handleUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file, 900, 0.7);
+      commit({ drawingImage: dataUrl });
+    } catch { showToast("이미지 처리 실패"); }
+  };
+
+  const submitApproval = (step, result, reviewer, opinion) => {
+    const entry = { step, result, reviewer, opinion, timestamp: new Date().toISOString() };
+    const approvals = [...local.approvals, entry];
+    let status = local.status;
+    if (result === "반려") status = "반려";
+    else {
+      const doneSteps = new Set(approvals.filter((a) => a.result === "승인").map((a) => a.step));
+      status = APPROVAL_STEPS.every((s) => doneSteps.has(s)) ? "승인완료" : "검토중";
+    }
+    commit({ approvals, status });
+    setApprovalTarget(null);
+  };
+
+  const saveSignature = (day, who, dataUrl) => {
+    const dailyChecks = local.dailyChecks.map((d) => (d.day === day ? { ...d, [who === "coop" ? "coopSign" : "dleSign"]: dataUrl } : d));
+    const firstDone = dailyChecks[0].coopSign && dailyChecks[0].dleSign;
+    const status = local.status === "승인완료" && firstDone ? "작업중" : local.status;
+    commit({ dailyChecks, status });
+    setSignTarget(null);
+  };
+  const clearSignature = (day, who) => commit({ dailyChecks: local.dailyChecks.map((d) => (d.day === day ? { ...d, [who === "coop" ? "coopSign" : "dleSign"]: null } : d)) });
+  const setDailyDate = (day, date) => commit({ dailyChecks: local.dailyChecks.map((d) => (d.day === day ? { ...d, date } : d)) });
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <button onClick={onBack} style={{ border: "none", background: "none", cursor: "pointer", color: "#6B6560", fontSize: 13, fontWeight: 700 }}>← 목록으로</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <StatusBadge status={local.status} />
+          <button onClick={onPrint} style={{ border: "1px solid #E7E4DE", background: "#fff", borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }}>🖨 양식 출력</button>
+          <button onClick={() => setConfirmDelete(true)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C4988E", fontSize: 16 }}>🗑</button>
+        </div>
+      </div>
+
+      <Card title="기본 정보">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Permit No"><input style={inputStyle} value={local.permitNo} onChange={setField("permitNo")} placeholder="사다리-2026-001" /></Field>
+          <Field label="협력사"><input style={inputStyle} value={local.coopCompany} onChange={setField("coopCompany")} /></Field>
+          <Field label="타입"><select style={inputStyle} value={local.workType} onChange={setField("workType")}><option value="A형">A형</option><option value="일자형">일자형</option></select></Field>
+          <div />
+          <Field label="작업 일자 (시작)"><input type="date" style={inputStyle} value={local.workDateStart} onChange={setField("workDateStart")} /></Field>
+          <Field label="작업 일자 (종료, 최대 7일)"><input type="date" style={inputStyle} value={local.workDateEnd} onChange={setField("workDateEnd")} /></Field>
+          <Field label="작업 시간 (시작)"><input type="time" style={inputStyle} value={local.workTimeStart} onChange={setField("workTimeStart")} /></Field>
+          <Field label="작업 시간 (종료)"><input type="time" style={inputStyle} value={local.workTimeEnd} onChange={setField("workTimeEnd")} /></Field>
+          <Field label="작업 위치 (구체적 기술)" full><input style={inputStyle} value={local.location} onChange={setField("location")} /></Field>
+          <Field label="작업 내용" full><textarea style={{ ...inputStyle, minHeight: 60 }} value={local.workContent} onChange={setField("workContent")} /></Field>
+        </div>
+      </Card>
+
+      <Card title="비상 연락처 (소장) · 신청인">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <Field label="비상연락 성명"><input style={inputStyle} value={local.emergencyName} onChange={setField("emergencyName")} /></Field>
+          <Field label="직책"><input style={inputStyle} value={local.emergencyPosition} onChange={setField("emergencyPosition")} /></Field>
+          <Field label="연락처"><input style={inputStyle} value={local.emergencyPhone} onChange={setField("emergencyPhone")} /></Field>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+          <Field label="신청인(협력업체 소장) 성명"><input style={inputStyle} value={local.applicantName} onChange={setField("applicantName")} /></Field>
+          <Field label="직급"><input style={inputStyle} value={local.applicantPosition} onChange={setField("applicantPosition")} /></Field>
+          <Field label="연락처"><input style={inputStyle} value={local.applicantPhone} onChange={setField("applicantPhone")} /></Field>
+        </div>
+      </Card>
+
+      <Card title="작업 준비사항 (A) — 체크리스트">
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {CHECKLIST_ITEMS.map((item) => (
+            <div key={item.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", background: "#FCFBF9", borderRadius: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{item.label}</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                {["YES", "NO", "N/A"].map((opt) => (
+                  <button key={opt} onClick={() => setChecklist(item.key, opt)} style={{ padding: "4px 10px", fontSize: 11.5, fontWeight: 700, borderRadius: 6, cursor: "pointer", border: local.checklist[item.key] === opt ? "1px solid transparent" : "1px solid #E7E4DE", background: local.checklist[item.key] === opt ? (opt === "YES" ? "#2E9C6C" : opt === "NO" ? "#D9453A" : "#B5AFA6") : "#fff", color: local.checklist[item.key] === opt ? "#fff" : "#8A857D" }}>{opt}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <Field label="추가 안전조치 및 기타사항" full><textarea style={{ ...inputStyle, minHeight: 50 }} value={local.extraNote} onChange={setField("extraNote")} /></Field>
+        </div>
+      </Card>
+
+      <Card title="도면 (상세위치표기)">
+        {local.drawingImage ? (
+          <div style={{ position: "relative" }}>
+            <img src={local.drawingImage} alt="도면" style={{ width: "100%", borderRadius: 8, border: "1px solid #E7E4DE" }} />
+            <button onClick={() => commit({ drawingImage: null })} style={{ position: "absolute", top: 8, right: 8, background: "#20242AEE", border: "none", borderRadius: 6, padding: 6, cursor: "pointer", color: "#fff" }}>✕</button>
+          </div>
+        ) : (
+          <label style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, border: "1.5px dashed #DEDAD2", borderRadius: 10, padding: "28px 16px", cursor: "pointer", color: "#A6A198" }}>
+            <span style={{ fontSize: 12.5 }}>⬆ 도면 이미지 업로드 (자동 압축됨)</span>
+            <input type="file" accept="image/*" onChange={handleUpload} style={{ display: "none" }} />
+          </label>
+        )}
+      </Card>
+
+      <Card title="DL이앤씨 확인/승인 로그">
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {APPROVAL_STEPS.map((step) => {
+            const entries = local.approvals.filter((a) => a.step === step);
+            return (
+              <div key={step} style={{ border: "1px solid #E7E4DE", borderRadius: 10, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: entries.length ? 8 : 0 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13 }}>{step}</span>
+                  {session.role === "admin" ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => setApprovalTarget({ step, result: "승인" })} style={{ border: "none", borderRadius: 6, padding: "5px 10px", background: "#E7F2ED", color: "#1D6E4C", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✓ 승인</button>
+                      <button onClick={() => setApprovalTarget({ step, result: "반려" })} style={{ border: "none", borderRadius: 6, padding: "5px 10px", background: "#FBEAE8", color: "#A32D24", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>✕ 반려</button>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 11, color: "#B5AFA6", fontWeight: 600 }}>🔒 DL이앤씨 관리자만 승인 가능</span>
+                  )}
+                </div>
+                {entries.map((e, i) => (
+                  <div key={i} style={{ fontSize: 11.5, color: "#6B6560", padding: "6px 0", borderTop: "1px solid #F1F0EC" }}>
+                    <b style={{ color: e.result === "승인" ? "#1D6E4C" : "#A32D24" }}>{e.result}</b> · {e.reviewer} · {new Date(e.timestamp).toLocaleString("ko-KR")}
+                    {e.opinion && <div style={{ marginTop: 2 }}>의견: {e.opinion}</div>}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card title="일일 작업 점검 (작업 당일) — 서명">
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead><tr><th style={thStyle}>일차</th><th style={thStyle}>날짜</th><th style={thStyle}>협력사 서명</th><th style={thStyle}>DLE&C(시공) 서명</th></tr></thead>
+            <tbody>
+              {local.dailyChecks.map((d) => (
+                <tr key={d.day}>
+                  <td style={tdStyle}>{d.day}일차</td>
+                  <td style={tdStyle}><input type="date" value={d.date} onChange={(e) => setDailyDate(d.day, e.target.value)} style={{ ...inputStyle, padding: "4px 6px", fontSize: 12 }} /></td>
+                  <td style={{ ...tdStyle, textAlign: "center" }}><SignatureCell value={d.coopSign} onSign={() => setSignTarget({ day: d.day, who: "coop" })} onClear={() => clearSignature(d.day, "coop")} /></td>
+                  <td style={{ ...tdStyle, textAlign: "center" }}><SignatureCell value={d.dleSign} onSign={() => setSignTarget({ day: d.day, who: "dle" })} onClear={() => clearSignature(d.day, "dle")} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {signTarget && (
+        <SignaturePadModal title={`${signTarget.day}일차 · ${signTarget.who === "coop" ? "협력사" : "DLE&C(시공)"} 서명`} onCancel={() => setSignTarget(null)} onSave={(dataUrl) => saveSignature(signTarget.day, signTarget.who, dataUrl)} />
+      )}
+      {approvalTarget && (
+        <ApprovalModal step={approvalTarget.step} result={approvalTarget.result} defaultName={session.name} onCancel={() => setApprovalTarget(null)} onSubmit={(reviewer, opinion) => submitApproval(approvalTarget.step, approvalTarget.result, reviewer, opinion)} />
+      )}
+      {confirmDelete && (
+        <ConfirmModal message="이 허가서를 삭제할까요? 되돌릴 수 없습니다." onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); onDelete(); }} />
+      )}
+    </div>
+  );
+}
+
+function SignatureCell({ value, onSign, onClear }) {
+  if (value) return <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><img src={value} alt="서명" style={{ height: 28, background: "#fff", border: "1px solid #E7E4DE", borderRadius: 4 }} /><button onClick={onClear} style={{ border: "none", background: "none", cursor: "pointer", color: "#C4988E" }}>✕</button></div>;
+  return <button onClick={onSign} style={{ border: "1px dashed #DEDAD2", background: "#FCFBF9", borderRadius: 6, padding: "5px 10px", fontSize: 11, fontWeight: 700, color: "#A6A198", cursor: "pointer" }}>서명하기</button>;
+}
+
+function SignaturePadModal({ title, onCancel, onSave }) {
+  const canvasRef = useRef(null);
+  const drawing = useRef(false);
+  const empty = useRef(true);
+  const getPos = (e, canvas) => { const rect = canvas.getBoundingClientRect(); const t = e.touches ? e.touches[0] : e; return { x: t.clientX - rect.left, y: t.clientY - rect.top }; };
+  const start = (e) => { e.preventDefault(); drawing.current = true; const canvas = canvasRef.current; const ctx = canvas.getContext("2d"); const { x, y } = getPos(e, canvas); ctx.beginPath(); ctx.moveTo(x, y); };
+  const move = (e) => { if (!drawing.current) return; e.preventDefault(); const canvas = canvasRef.current; const ctx = canvas.getContext("2d"); const { x, y } = getPos(e, canvas); ctx.lineTo(x, y); ctx.strokeStyle = "#20242A"; ctx.lineWidth = 2.4; ctx.lineCap = "round"; ctx.stroke(); empty.current = false; };
+  const end = () => { drawing.current = false; };
+  const clearCanvas = () => { const canvas = canvasRef.current; canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height); empty.current = true; };
+  const save = () => { if (empty.current) return; onSave(canvasRef.current.toDataURL("image/png")); };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#20242A99", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 18, width: "100%", maxWidth: 380 }}>
+        <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>{title}</div>
+        <canvas ref={canvasRef} width={330} height={150} style={{ width: "100%", height: 150, background: "#FCFBF9", border: "1.5px solid #E7E4DE", borderRadius: 8, touchAction: "none" }} onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end} onTouchStart={start} onTouchMove={move} onTouchEnd={end} />
+        <div style={{ fontSize: 11, color: "#A6A198", margin: "6px 0 14px" }}>마우스 또는 손가락으로 서명해 주세요</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={clearCanvas} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid #E7E4DE", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>지우기</button>
+          <button onClick={onCancel} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid #E7E4DE", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>취소</button>
+          <button onClick={save} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#F5A623", cursor: "pointer", fontWeight: 800, fontSize: 13, color: "#20242A" }}>서명 저장</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalModal({ step, result, defaultName, onCancel, onSubmit }) {
+  const [reviewer, setReviewer] = useState(defaultName || "");
+  const [opinion, setOpinion] = useState("");
+  const isReject = result === "반려";
+  const canSubmit = reviewer.trim().length > 0 && (!isReject || opinion.trim().length > 0);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#20242A99", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 18, width: "100%", maxWidth: 360 }}>
+        <div style={{ fontWeight: 800, fontSize: 14.5, marginBottom: 14 }}>{isReject ? "✕" : "✓"} {step} — {result}</div>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: "#9C968D", marginBottom: 4 }}>{isReject ? "반려자" : "승인자"} 이름</div>
+        <input autoFocus style={{ ...inputStyle, marginBottom: 12 }} value={reviewer} onChange={(e) => setReviewer(e.target.value)} />
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: "#9C968D", marginBottom: 4 }}>{isReject ? "반려 사유 / 보완 요청사항 (필수)" : "검토 의견 (선택)"}</div>
+        <textarea style={{ ...inputStyle, minHeight: 70, marginBottom: 16 }} value={opinion} onChange={(e) => setOpinion(e.target.value)} placeholder={isReject ? "예: 사다리 작업 시 2인 1조 인원 편성 바랍니다." : ""} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onCancel} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid #E7E4DE", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>취소</button>
+          <button disabled={!canSubmit} onClick={() => onSubmit(reviewer.trim(), opinion.trim())} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", cursor: canSubmit ? "pointer" : "not-allowed", fontWeight: 800, fontSize: 13, background: canSubmit ? (isReject ? "#D9453A" : "#2E9C6C") : "#E7E4DE", color: canSubmit ? "#fff" : "#A6A198" }}>기록하기</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmModal({ message, onCancel, onConfirm }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#20242A99", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 18, width: "100%", maxWidth: 320 }}>
+        <div style={{ fontSize: 13.5, marginBottom: 16, lineHeight: 1.5 }}>{message}</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={onCancel} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "1px solid #E7E4DE", background: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>취소</button>
+          <button onClick={onConfirm} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#D9453A", color: "#fff", cursor: "pointer", fontWeight: 800, fontSize: 13 }}>삭제</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Card({ title, children }) {
+  return <div style={{ background: "#fff", border: "1px solid #E7E4DE", borderRadius: 12, padding: 16, marginBottom: 14 }}><div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 12 }}>{title}</div>{children}</div>;
+}
+
+// ---------------- 인쇄용 양식 뷰 ----------------
+function fmtDateKor(iso) { if (!iso) return "____년 __월 __일"; const [y, m, d] = iso.split("-"); return `${y.slice(2)}년 ${m}월 ${d}일`; }
+function totalDays(s, e) { if (!s || !e) return ""; const diff = Math.round((new Date(e) - new Date(s)) / 86400000) + 1; return diff > 0 ? diff : ""; }
+function Box3({ value }) { const opt = (label) => <span style={{ marginRight: 10, whiteSpace: "nowrap" }}><span style={{ display: "inline-block", width: 11, height: 11, border: "1.3px solid #000", marginRight: 3, verticalAlign: "middle", background: value === label ? "#000" : "#fff" }} />{label}</span>; return <span>{opt("YES")}{opt("NO")}{opt("N/A")}</span>; }
+function TypeMark({ selected, label }) { return <span style={{ marginRight: 14 }}>{label} (<span style={{ display: "inline-block", width: 12, height: 12, borderRadius: "50%", border: "1.3px solid #000", verticalAlign: "middle", background: selected ? "#000" : "#fff" }} />)</span>; }
+const pf = { border: "1px solid #000", padding: "6px 8px", fontSize: 12, verticalAlign: "middle" };
+const pfLabel = { ...pf, background: "#E4E1DA", fontWeight: 700, textAlign: "center", whiteSpace: "nowrap" };
+const pfHeader = { background: "#111", color: "#fff", fontWeight: 700, fontSize: 12.5, padding: "5px 10px", display: "inline-block", marginBottom: 6 };
+
+function PrintView({ permit: p, onClose }) {
+  const displayDays = p.dailyChecks.slice(0, 7);
+  const getStep = (step) => { const entries = p.approvals.filter((a) => a.step === step); return entries[entries.length - 1] || null; };
+  return (
+    <div style={{ background: "#78756F" }}>
+      <div className="no-print" style={{ position: "sticky", top: 0, zIndex: 10, background: "#20242A", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <button onClick={onClose} style={{ border: "none", background: "none", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 700 }}>← 편집으로 돌아가기</button>
+        <button onClick={() => window.print()} style={{ border: "none", borderRadius: 8, padding: "8px 16px", background: "#F5A623", color: "#20242A", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>🖨 인쇄하기</button>
+      </div>
+      <div style={{ maxWidth: 820, margin: "20px auto", background: "#fff", padding: "26px 30px", color: "#000" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>사다리 작업 허가서</h1>
+          <div style={{ fontSize: 12 }}>Permit No : 사다리 - {p.permitNo || "\u00A0\u00A0\u00A0\u00A0"}</div>
+        </div>
+        <div style={pfHeader}>[ 협력사 작성 (작업 전일 15시까지 작성) ]</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 10 }}>
+          <tbody>
+            <tr><td style={{ ...pfLabel, width: 80 }}>작성 대상</td><td style={pf} colSpan={4}>틀비계 / 말비계 / 고소작업대 사용할 수 없는 좁은 공간 / 입시 승하강 통로 사용</td></tr>
+            <tr>
+              <td style={pfLabel} rowSpan={3}>작업사항</td>
+              <td style={{ ...pfLabel, width: 80 }}>작업 일자</td>
+              <td style={pf}>{fmtDateKor(p.workDateStart)} ~ {fmtDateKor(p.workDateEnd)} (총 {totalDays(p.workDateStart, p.workDateEnd)}일)</td>
+              <td style={{ ...pfLabel, width: 70 }}>작업 시간</td>
+              <td style={pf}>{p.workTimeStart || "__:__"} ~ {p.workTimeEnd || "__:__"}</td>
+            </tr>
+            <tr><td style={pfLabel}>협력사</td><td style={pf}>{p.coopCompany}</td><td style={pfLabel}>타입</td><td style={pf}><TypeMark label="A형" selected={p.workType === "A형"} /><TypeMark label="일자형" selected={p.workType === "일자형"} /></td></tr>
+            <tr><td style={pfLabel}>필수 첨부서류</td><td style={pf} colSpan={3}>사용위치도면</td></tr>
+          </tbody>
+        </table>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 10 }}>
+          <tbody>
+            <tr><td style={pfLabel} rowSpan={3}>세부 작업내용</td><td style={pfLabel}>작업 위치<br />(구체적 기술)</td><td style={pf} colSpan={2}>{p.location}</td></tr>
+            <tr><td style={pfLabel}>작업 내용</td><td style={pf} colSpan={2}>{p.workContent}</td></tr>
+            <tr><td style={pfLabel}>비상 상황 시<br />연락처(소장)</td><td style={pf} colSpan={2}>성명 : {p.emergencyName}&nbsp;&nbsp;&nbsp;직책 : {p.emergencyPosition}&nbsp;&nbsp;&nbsp;연락처 : {p.emergencyPhone}</td></tr>
+          </tbody>
+        </table>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 10 }}>
+          <tbody>
+            <tr>
+              <td style={{ ...pfLabel, width: 90, writingMode: "vertical-rl", textAlign: "center" }} rowSpan={CHECKLIST_ITEMS.length + 1}>작업 준비 사항 (A)</td>
+              <td style={{ ...pf, width: 170 }}>{CHECKLIST_ITEMS[0].label}</td>
+              <td style={pf}><Box3 value={p.checklist[CHECKLIST_ITEMS[0].key]} /></td>
+              <td style={{ ...pf, textAlign: "center", fontWeight: 700, background: "#E4E1DA" }} rowSpan={CHECKLIST_ITEMS.length + 1}>
+                도 면 (상세위치표기)
+                <div style={{ marginTop: 6, fontWeight: 400 }}>{p.drawingImage ? <img src={p.drawingImage} alt="도면" style={{ width: "100%", maxHeight: 260, objectFit: "contain", border: "1px solid #999" }} /> : <div style={{ height: 220, border: "1px dashed #999" }} />}</div>
+              </td>
+            </tr>
+            {CHECKLIST_ITEMS.slice(1).map((item) => <tr key={item.key}><td style={pf}>{item.label}</td><td style={pf}><Box3 value={p.checklist[item.key]} /></td></tr>)}
+            <tr><td style={pf} colSpan={2}>&lt;추가 안전조치 및 기타사항&gt; {p.extraNote}</td></tr>
+          </tbody>
+        </table>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+          <tbody><tr><td style={{ ...pfLabel, width: 140 }}>신청인<br />(협력업체 소장)</td><td style={pf}>성명 : {p.applicantName}&nbsp;&nbsp;&nbsp;직급 : {p.applicantPosition}&nbsp;&nbsp;&nbsp;연락처 : {p.applicantPhone}</td></tr></tbody>
+        </table>
+        <div style={pfHeader}>[ DL이앤씨 확인/승인 (작업 전일 업무 종료 시까지) ]</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+          <thead><tr><td style={{ ...pfLabel, width: 130 }}>검 토 자</td><td style={{ ...pfLabel, width: 100 }}>결과</td><td style={pfLabel}>검 토 의 견</td></tr></thead>
+          <tbody>{APPROVAL_STEPS.map((step) => { const e = getStep(step); return <tr key={step}><td style={pf}>{step} ({e ? e.reviewer : "서명"})</td><td style={{ ...pf, textAlign: "center" }}>{e ? <b>{e.result}</b> : <span style={{ color: "#999" }}>(승인) (반려)</span>}</td><td style={pf}>{e ? e.opinion : ""}</td></tr>; })}</tbody>
+        </table>
+        <div style={pfHeader}>[ 협력사·DL이앤씨 확인·승인 (작업 당일) ]</div>
+        <div style={{ fontSize: 10.5, marginBottom: 4 }}>※ 일일 작업 시작 전 작업준비사항(A)에 대해 이상 없이 준비되었는지 확인하고 일일 작업을 승인한다.</div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <tbody>
+            <tr><td style={{ ...pfLabel, width: 90 }}>점검자</td>{displayDays.map((d) => <td key={d.day} style={{ ...pfLabel, fontSize: 10.5 }}>{d.day}일차{d.date ? `(${d.date.slice(5).replace("-", "/")})` : ""}</td>)}</tr>
+            <tr><td style={pfLabel}>협력사</td>{displayDays.map((d) => <td key={d.day} style={{ ...pf, textAlign: "center" }}>{d.coopSign ? <img src={d.coopSign} alt="서명" style={{ height: 20 }} /> : ""}</td>)}</tr>
+            <tr><td style={pfLabel}>DLE&C<br />(시공)</td>{displayDays.map((d) => <td key={d.day} style={{ ...pf, textAlign: "center" }}>{d.dleSign ? <img src={d.dleSign} alt="서명" style={{ height: 20 }} /> : ""}</td>)}</tr>
+          </tbody>
+        </table>
+        <div style={{ marginTop: 16, fontSize: 10, color: "#555", display: "flex", justifyContent: "space-between" }}><b>DL E&C</b><span>본 정보(문서)는 대림산업의 자산으로서, 허가 없는 사외반출을 금지합니다.</span></div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
