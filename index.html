@@ -32,15 +32,29 @@
      설정: Firebase 프로젝트 정보를 아래에 채워 넣으세요.
      (Firebase 콘솔 > 프로젝트 설정 > 일반 > 내 앱 > SDK 설정 및 구성 에서 복사)
      =================================================================== -->
-<script>
-  window.__FIREBASE_CONFIG__ = {
-    apiKey: "여기에_API_KEY",
-    authDomain: "여기에_PROJECT_ID.firebaseapp.com",
-    projectId: "여기에_PROJECT_ID",
-    storageBucket: "여기에_PROJECT_ID.appspot.com",
-    messagingSenderId: "여기에_SENDER_ID",
-    appId: "여기에_APP_ID"
+ 
+<script type="module">
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-analytics.js";
+  // TODO: Add SDKs for Firebase products that you want to use
+  // https://firebase.google.com/docs/web/setup#available-libraries
+
+  // Your web app's Firebase configuration
+  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = {
+    apiKey: "AIzaSyCW7Y_YUOYV7T8LI1hVC3gFRyNvDjGookE",
+    authDomain: "ladder-permit.firebaseapp.com",
+    projectId: "ladder-permit",
+    storageBucket: "ladder-permit.firebasestorage.app",
+    messagingSenderId: "71651395949",
+    appId: "1:71651395949:web:9a0f8ad1bb9829ba5ef264",
+    measurementId: "G-1592LL4500"
   };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
 </script>
 
 <script type="text/babel" data-presets="react">
