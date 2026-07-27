@@ -434,9 +434,8 @@ function App() {
   useEffect(() => {
     if (!session) return;
     if (firebaseReady) {
-      const unsub = db.collection("permits").onSnapshot(snap => {
+      const unsub = db.collection("permits").orderBy("createdAt", "desc").limit(80).onSnapshot(snap => {
         const list = snap.docs.map(d => d.data());
-        list.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
         setPermits(list);
         setLoading(false);
       }, err => {
@@ -1034,7 +1033,7 @@ function EditView({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await resizeImage(file, 900, 0.7);
+      const dataUrl = await resizeImage(file, 640, 0.5);
       commit({
         drawingImage: dataUrl
       });
