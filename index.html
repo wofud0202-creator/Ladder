@@ -433,18 +433,35 @@ function App() {
   };
   useEffect(() => {
     if (!session) return;
+    setLoading(true);
+    let settled = false;
+    const safetyTimer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        setLoading(false);
+      }
+    }, 6000);
     if (firebaseReady) {
       const unsub = db.collection("permits").orderBy("createdAt", "desc").limit(80).onSnapshot(snap => {
+        settled = true;
+        clearTimeout(safetyTimer);
         const list = snap.docs.map(d => d.data());
         setPermits(list);
         setLoading(false);
       }, err => {
+        settled = true;
+        clearTimeout(safetyTimer);
         console.error(err);
         showToast("동기화 오류: " + err.message);
         setLoading(false);
       });
-      return () => unsub();
+      return () => {
+        unsub();
+        clearTimeout(safetyTimer);
+      };
     } else {
+      settled = true;
+      clearTimeout(safetyTimer);
       try {
         setPermits(JSON.parse(localStorage.getItem("permits_local") || "[]"));
       } catch {
@@ -1087,6 +1104,16 @@ function EditView({
     setConfirmSubmit(false);
     showToast("결재가 상신되었습니다.");
   };
+  const [confirmComplete, setConfirmComplete] = useState(false);
+  const completePermitNow = () => {
+    commit({
+      status: "완료",
+      completedAt: new Date().toISOString(),
+      completedBy: session.name
+    });
+    setConfirmComplete(false);
+    showToast("작업이 종결 처리되었습니다.");
+  };
   const submitApproval = (step, result, reviewer, opinion) => {
     const entry = {
       step,
@@ -1595,7 +1622,24 @@ function EditView({
       fontSize: 14,
       cursor: "pointer"
     }
-  }, "📤 결재상신")) : /*#__PURE__*/React.createElement("span", {
+  }, "📤 결재상신")) : (local.status === "승인완료" || local.status === "작업중") && session.role === "admin" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      color: "#9C968D"
+    }
+  }, "현재 상태: ", local.status, ". 작업이 끝났다면(일부만 진행 후 종료된 경우 포함) 종결 처리해 주세요."), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmComplete(true),
+    style: {
+      border: "none",
+      borderRadius: 10,
+      padding: "12px 22px",
+      background: "#7A64C9",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 14,
+      cursor: "pointer"
+    }
+  }, "🏁 작업 종결처리")) : /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 13,
       fontWeight: 700,
@@ -1607,6 +1651,12 @@ function EditView({
     onConfirm: confirmSubmitNow,
     confirmLabel: "상신하기",
     confirmColor: "#2E9C6C"
+  }), confirmComplete && /*#__PURE__*/React.createElement(ConfirmModal, {
+    message: "이 허가서를 종결 처리할까요? 계획된 7일을 다 채우지 않았어도, 실제 작업이 끝났다면 종결 처리해 주세요. 처리 후 완료 상태로 전환됩니다.",
+    onCancel: () => setConfirmComplete(false),
+    onConfirm: completePermitNow,
+    confirmLabel: "종결 처리",
+    confirmColor: "#7A64C9"
   }), signTarget && /*#__PURE__*/React.createElement(SignaturePadModal, {
     title: `${signTarget.day}일차 · ${signTarget.who === "coop" ? "협력사" : "DLE&C(시공)"} 서명`,
     onCancel: () => setSignTarget(null),
