@@ -523,6 +523,7 @@ function App() {
   }
   const active = permits.find(p => p.id === activeId) || null;
   const printPermit = permits.find(p => p.id === printId) || null;
+  const visiblePermits = session.role === "admin" ? permits : permits.filter(p => (p.createdBy && p.createdBy.company === session.company) || p.coopCompany === session.company);
   if (printPermit) return /*#__PURE__*/React.createElement(PrintView, {
     permit: printPermit,
     onClose: () => setPrintId(null)
@@ -563,13 +564,15 @@ function App() {
       color: "#8A857D"
     }
   }, "불러오는 중…") : view === "dashboard" ? /*#__PURE__*/React.createElement(Dashboard, {
-    permits: permits,
+    permits: visiblePermits,
+    session: session,
     onOpen: id => {
       setActiveId(id);
       setView("edit");
     }
   }) : view === "list" ? /*#__PURE__*/React.createElement(ListView, {
-    permits: permits,
+    permits: visiblePermits,
+    session: session,
     onOpen: id => {
       setActiveId(id);
       setView("edit");
@@ -735,12 +738,19 @@ function StatusBadge({
 }
 function Dashboard({
   permits,
+  session,
   onOpen
 }) {
   const active = permits.filter(p => p.status === "승인완료" || p.status === "작업중");
   const pending = permits.filter(p => p.status === "검토중");
   const rejected = permits.filter(p => p.status === "반려");
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "#9C968D",
+      marginBottom: 10
+    }
+  }, session && session.role === "admin" ? "전체 업체 현황 (관리자)" : `${session ? session.company : ""} 업체 현황`), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "grid",
       gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))",
@@ -938,12 +948,22 @@ function MiniRow({
 }
 function ListView({
   permits,
+  session,
   onOpen
 }) {
   const [filter, setFilter] = useState("전체");
+  const [companyFilter, setCompanyFilter] = useState("전체");
   const statuses = ["전체", "작성중", "검토중", "반려", "승인완료", "작업중", "완료"];
-  const filtered = filter === "전체" ? permits : permits.filter(p => p.status === filter);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  const companies = Array.from(new Set(permits.map(p => p.coopCompany).filter(Boolean))).sort();
+  const isAdmin = session && session.role === "admin";
+  const filtered = permits
+    .filter(p => filter === "전체" || p.status === filter)
+    .filter(p => !isAdmin || companyFilter === "전체" || p.coopCompany === companyFilter);
+  return /*#__PURE__*/React.createElement("div", null, isAdmin && companies.length > 0 && /*#__PURE__*/React.createElement("select", {
+    value: companyFilter,
+    onChange: e => setCompanyFilter(e.target.value),
+    style: { ...inputStyle, width: "auto", marginBottom: 10, display: "inline-block" }
+  }, /*#__PURE__*/React.createElement("option", { value: "전체" }, "전체 업체"), companies.map(c => /*#__PURE__*/React.createElement("option", { key: c, value: c }, c))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
